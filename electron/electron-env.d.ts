@@ -150,6 +150,11 @@ interface Window {
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean> | boolean) => () => void;
 		setLocale: (locale: string) => Promise<void>;
+		onMcpCommand: (
+			target: "hud" | "editor",
+			callback: (method: string, args: unknown) => Promise<unknown> | unknown,
+		) => () => void;
+		notifyMcpTargetReady: (target: "hud" | "editor") => void;
 	};
 }
 

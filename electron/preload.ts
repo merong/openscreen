@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { RecordingSession, StoreRecordedSessionInput } from "../src/lib/recordingSession";
 
+type McpCommandTarget = "hud" | "editor";
+type McpCommandHandler = (method: string, args: unknown) => Promise<unknown> | unknown;
+
 // Asset base URL is passed from the main process via webPreferences.additionalArguments
 // (see windows.ts). Sandboxed preloads cannot import node:path / node:url, so we
 // can't compute it here.
@@ -165,5 +168,46 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		};
 		ipcRenderer.on("request-save-before-close", listener);
 		return () => ipcRenderer.removeListener("request-save-before-close", listener);
+	},
+	onMcpCommand: (target: McpCommandTarget, callback: McpCommandHandler) => {
+		const listener = async (_event: unknown, envelope: unknown) => {
+			if (!envelope || typeof envelope !== "object") {
+				return;
+			}
+
+			const request = envelope as {
+				id?: unknown;
+				target?: unknown;
+				method?: unknown;
+				args?: unknown;
+			};
+			if (
+				typeof request.id !== "string" ||
+				request.target !== target ||
+				typeof request.method !== "string"
+			) {
+				return;
+			}
+
+			try {
+				const result = await callback(request.method, request.args);
+				ipcRenderer.send("mcp:command-result", {
+					id: request.id,
+					ok: true,
+					result,
+				});
+			} catch (error) {
+				ipcRenderer.send("mcp:command-result", {
+					id: request.id,
+					ok: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
+		ipcRenderer.on("mcp:command", listener);
+		return () => ipcRenderer.removeListener("mcp:command", listener);
+	},
+	notifyMcpTargetReady: (target: McpCommandTarget) => {
+		ipcRenderer.send("mcp:renderer-ready", target);
 	},
 });

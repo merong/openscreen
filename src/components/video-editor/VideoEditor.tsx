@@ -16,6 +16,7 @@ import { useShortcuts } from "@/contexts/ShortcutsContext";
 import { INITIAL_EDITOR_STATE, useEditorHistory } from "@/hooks/useEditorHistory";
 import { type Locale } from "@/i18n/config";
 import { getAvailableLocales, getLocaleName } from "@/i18n/loader";
+import { addCustomFont, getCustomFonts, removeCustomFont } from "@/lib/customFonts";
 import {
 	calculateOutputDimensions,
 	type ExportFormat,
@@ -30,7 +31,7 @@ import {
 } from "@/lib/exporter";
 import { computeFrameStepTime } from "@/lib/frameStep";
 import type { ProjectMedia } from "@/lib/recordingSession";
-import { matchesShortcut } from "@/lib/shortcuts";
+import { matchesShortcut, type ShortcutsConfig } from "@/lib/shortcuts";
 import { loadUserPreferences, saveUserPreferences } from "@/lib/userPreferences";
 import { BackgroundLoadError } from "@/lib/wallpaper";
 import {
@@ -62,6 +63,7 @@ import {
 	DEFAULT_ANNOTATION_SIZE,
 	DEFAULT_ANNOTATION_STYLE,
 	DEFAULT_BLUR_DATA,
+	DEFAULT_CROP_REGION,
 	DEFAULT_FIGURE_DATA,
 	DEFAULT_PLAYBACK_SPEED,
 	DEFAULT_ZOOM_DEPTH,
@@ -76,6 +78,28 @@ import {
 	type ZoomRegion,
 } from "./types";
 import VideoPlayback, { VideoPlaybackRef } from "./VideoPlayback";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function finiteNumber(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+	return typeof value === "boolean" ? value : null;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+	return Math.min(max, Math.max(min, value));
+}
+
+function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+	return Object.fromEntries(
+		Object.entries(value).filter((entry) => entry[1] !== undefined),
+	) as Partial<T>;
+}
 
 export default function VideoEditor() {
 	const {
@@ -155,7 +179,7 @@ export default function VideoEditor() {
 	const nextTrimIdRef = useRef(1);
 	const nextSpeedIdRef = useRef(1);
 
-	const { shortcuts, isMac } = useShortcuts();
+	const { shortcuts, isMac, setShortcuts } = useShortcuts();
 	// Off-Mac doesn't have click telemetry, so force `onlyOnClicks` off for
 	// renderers while keeping the persisted value intact for round-tripping.
 	const effectiveCursorHighlight = useMemo(
@@ -241,6 +265,7 @@ export default function VideoEditor() {
 				webcamMaskShape: normalizedEditor.webcamMaskShape,
 				webcamSizePreset: normalizedEditor.webcamSizePreset,
 				webcamPosition: normalizedEditor.webcamPosition,
+				cursorHighlight: normalizedEditor.cursorHighlight,
 			});
 			setExportQuality(normalizedEditor.exportQuality);
 			setExportFormat(normalizedEditor.exportFormat);
@@ -308,12 +333,14 @@ export default function VideoEditor() {
 			aspectRatio,
 			webcamLayoutPreset,
 			webcamMaskShape,
+			webcamSizePreset,
 			webcamPosition,
 			exportQuality,
 			exportFormat,
 			gifFrameRate,
 			gifLoop,
 			gifSizePreset,
+			cursorHighlight,
 		});
 	}, [
 		currentProjectMedia,
@@ -331,12 +358,14 @@ export default function VideoEditor() {
 		aspectRatio,
 		webcamLayoutPreset,
 		webcamMaskShape,
+		webcamSizePreset,
 		webcamPosition,
 		exportQuality,
 		exportFormat,
 		gifFrameRate,
 		gifLoop,
 		gifSizePreset,
+		cursorHighlight,
 	]);
 
 	const hasUnsavedChanges = hasProjectUnsavedChanges(currentProjectSnapshot, lastSavedSnapshot);
@@ -1728,6 +1757,907 @@ export default function VideoEditor() {
 			setExportError(null);
 			setExportedFilePath(null);
 		}
+	}, []);
+
+	const mcpEditorCommandHandlerRef = useRef<
+		(method: string, args: unknown) => Promise<unknown> | unknown
+	>(async () => ({ success: false, message: "Editor MCP handler is not ready." }));
+
+	const getMcpProjectEditorState = () => ({
+		wallpaper,
+		shadowIntensity,
+		showBlur,
+		motionBlurAmount,
+		borderRadius,
+		padding,
+		cropRegion,
+		zoomRegions,
+		trimRegions,
+		speedRegions,
+		annotationRegions,
+		aspectRatio,
+		webcamLayoutPreset,
+		webcamMaskShape,
+		webcamSizePreset,
+		webcamPosition,
+		exportQuality,
+		exportFormat,
+		gifFrameRate,
+		gifLoop,
+		gifSizePreset,
+		cursorHighlight,
+	});
+
+	const getMcpSelectionState = () => ({
+		selectedZoomId,
+		selectedTrimId,
+		selectedSpeedId,
+		selectedAnnotationId,
+		selectedBlurId,
+	});
+
+	const getMcpPlaybackState = () => ({
+		currentTime,
+		currentTimeMs: Math.round(currentTime * 1000),
+		duration,
+		durationMs: Math.round(duration * 1000),
+		isPlaying,
+		isFullscreen,
+	});
+
+	const getMcpExportSettings = () => ({
+		exportFormat,
+		exportQuality,
+		gifFrameRate,
+		gifLoop,
+		gifSizePreset,
+		isExporting,
+		exportProgress,
+		exportError,
+		exportedFilePath,
+		hasPendingExport: Boolean(unsavedExport),
+	});
+
+	const getMcpProjectSummary = () => ({
+		success: true,
+		loading,
+		error,
+		paths: {
+			videoPath,
+			videoSourcePath,
+			webcamVideoPath,
+			webcamVideoSourcePath,
+			currentProjectPath,
+		},
+		media: currentProjectMedia,
+		editor: getMcpProjectEditorState(),
+		selection: getMcpSelectionState(),
+		playback: getMcpPlaybackState(),
+		export: getMcpExportSettings(),
+		hasUnsavedChanges,
+		currentProjectSnapshot,
+		cursorTelemetry: {
+			sampleCount: cursorTelemetry.length,
+			clickCount: cursorClickTimestamps.length,
+		},
+	});
+
+	const commitMcpEditorPatch = (
+		patch: Partial<typeof editorState>,
+		commit = true,
+	): Record<string, unknown> => {
+		if (commit) {
+			pushState(patch);
+			commitState();
+		} else {
+			updateState(patch);
+		}
+		return { success: true, patch, commit };
+	};
+
+	const getMcpSpan = (input: Record<string, unknown>) => {
+		const span = isRecord(input.span) ? input.span : input;
+		const durationMs = finiteNumber(input.durationMs) ?? Math.round(duration * 1000);
+		const defaultStart = input.useCurrentTime ? currentTime * 1000 : 0;
+		const rawStart =
+			finiteNumber(span.startMs) ??
+			finiteNumber(span.start) ??
+			finiteNumber(input.timeMs) ??
+			defaultStart;
+		const rawEnd =
+			finiteNumber(span.endMs) ??
+			finiteNumber(span.end) ??
+			Math.min(rawStart + 1000, durationMs || rawStart + 1000);
+		const startMs = Math.max(0, Math.round(rawStart));
+		const endMs = Math.max(startMs + 1, Math.round(rawEnd));
+		return { startMs, endMs };
+	};
+
+	const getMcpId = (input: Record<string, unknown>, ...keys: string[]) => {
+		for (const key of ["id", "regionId", "annotationId", "fontId", ...keys]) {
+			const value = input[key];
+			if (typeof value === "string" && value.trim()) {
+				return value.trim();
+			}
+		}
+		return null;
+	};
+
+	const buildMcpExportSettings = (input: Record<string, unknown>): ExportSettings => {
+		const source = isRecord(input.settings) ? input.settings : input;
+		const nextFormat =
+			source.format === "gif" || source.exportFormat === "gif"
+				? "gif"
+				: source.format === "mp4" || source.exportFormat === "mp4"
+					? "mp4"
+					: exportFormat;
+		const nextQuality =
+			source.quality === "medium" || source.quality === "good" || source.quality === "source"
+				? source.quality
+				: source.exportQuality === "medium" ||
+						source.exportQuality === "good" ||
+						source.exportQuality === "source"
+					? source.exportQuality
+					: exportQuality;
+		const gifConfig = isRecord(source.gifConfig) ? source.gifConfig : {};
+		const nextGifFrameRate =
+			finiteNumber(source.frameRate) ??
+			finiteNumber(source.gifFrameRate) ??
+			finiteNumber(gifConfig.frameRate) ??
+			gifFrameRate;
+		const nextGifLoop =
+			booleanValue(source.loop) ??
+			booleanValue(source.gifLoop) ??
+			booleanValue(gifConfig.loop) ??
+			gifLoop;
+		const nextGifSizePreset =
+			source.sizePreset === "medium" ||
+			source.sizePreset === "large" ||
+			source.sizePreset === "original"
+				? source.sizePreset
+				: source.gifSizePreset === "medium" ||
+						source.gifSizePreset === "large" ||
+						source.gifSizePreset === "original"
+					? source.gifSizePreset
+					: gifConfig.sizePreset === "medium" ||
+							gifConfig.sizePreset === "large" ||
+							gifConfig.sizePreset === "original"
+						? gifConfig.sizePreset
+						: gifSizePreset;
+		const video = videoPlaybackRef.current?.video;
+		const sourceWidth = video?.videoWidth || 1920;
+		const sourceHeight = video?.videoHeight || 1080;
+		const aspectRatioValue =
+			aspectRatio === "native"
+				? getNativeAspectRatioValue(sourceWidth, sourceHeight, cropRegion)
+				: getAspectRatioValue(aspectRatio);
+		const gifDimensions = calculateOutputDimensions(
+			sourceWidth,
+			sourceHeight,
+			nextGifSizePreset,
+			GIF_SIZE_PRESETS,
+			aspectRatioValue,
+		);
+
+		return {
+			format: nextFormat,
+			quality: nextFormat === "mp4" ? (nextQuality as ExportQuality) : undefined,
+			gifConfig:
+				nextFormat === "gif"
+					? {
+							frameRate: nextGifFrameRate as GifFrameRate,
+							loop: nextGifLoop,
+							sizePreset: nextGifSizePreset as GifSizePreset,
+							width: gifDimensions.width,
+							height: gifDimensions.height,
+						}
+					: undefined,
+		};
+	};
+
+	mcpEditorCommandHandlerRef.current = async (method: string, args: unknown) => {
+		const input = isRecord(args) ? args : {};
+		const commit = booleanValue(input.commit) ?? true;
+
+		const updateAnnotationById = (
+			id: string,
+			updater: (region: AnnotationRegion) => AnnotationRegion,
+			commitUpdate = commit,
+		) => {
+			let updatedRegion: AnnotationRegion | null = null;
+			const update = (prev: typeof editorState) => ({
+				annotationRegions: prev.annotationRegions.map((region) => {
+					if (region.id !== id) return region;
+					updatedRegion = updater(region);
+					return updatedRegion;
+				}),
+			});
+			if (commitUpdate) {
+				pushState(update);
+			} else {
+				updateState(update);
+			}
+			return updatedRegion
+				? { success: true, id, region: updatedRegion }
+				: { success: false, id, message: "Annotation region not found." };
+		};
+
+		switch (method) {
+			case "project.current.get":
+			case "media.current.get":
+				return getMcpProjectSummary();
+			case "project.snapshot.get":
+				return {
+					success: true,
+					snapshot: currentProjectSnapshot,
+					hasUnsavedChanges,
+				};
+			case "project.save": {
+				const saved = await saveProject(booleanValue(input.forceSaveAs) ?? false);
+				return { success: saved, currentProjectPath };
+			}
+			case "project.load": {
+				const result = await window.electronAPI.loadProjectFile();
+				if (result.canceled || !result.success) return result;
+				const restored = await applyLoadedProject(result.project, result.path ?? null);
+				return { ...result, restored };
+			}
+			case "project.applyEditorState": {
+				const normalized = normalizeProjectEditor(
+					(isRecord(input.editor) ? input.editor : input) as Partial<
+						ReturnType<typeof getMcpProjectEditorState>
+					>,
+				);
+				const media = isRecord(input.media) ? (input.media as unknown as ProjectMedia) : null;
+				if (media?.screenVideoPath) {
+					setVideoSourcePath(media.screenVideoPath);
+					setVideoPath(toFileUrl(media.screenVideoPath));
+					setWebcamVideoSourcePath(media.webcamVideoPath ?? null);
+					setWebcamVideoPath(media.webcamVideoPath ? toFileUrl(media.webcamVideoPath) : null);
+				}
+				commitMcpEditorPatch(
+					{
+						wallpaper: normalized.wallpaper,
+						shadowIntensity: normalized.shadowIntensity,
+						showBlur: normalized.showBlur,
+						motionBlurAmount: normalized.motionBlurAmount,
+						borderRadius: normalized.borderRadius,
+						padding: normalized.padding,
+						cropRegion: normalized.cropRegion,
+						zoomRegions: normalized.zoomRegions,
+						trimRegions: normalized.trimRegions,
+						speedRegions: normalized.speedRegions,
+						annotationRegions: normalized.annotationRegions,
+						aspectRatio: normalized.aspectRatio,
+						webcamLayoutPreset: normalized.webcamLayoutPreset,
+						webcamMaskShape: normalized.webcamMaskShape,
+						webcamSizePreset: normalized.webcamSizePreset,
+						webcamPosition: normalized.webcamPosition,
+						cursorHighlight: normalized.cursorHighlight,
+					},
+					commit,
+				);
+				setExportQuality(normalized.exportQuality);
+				setExportFormat(normalized.exportFormat);
+				setGifFrameRate(normalized.gifFrameRate);
+				setGifLoop(normalized.gifLoop);
+				setGifSizePreset(normalized.gifSizePreset);
+				return { success: true, editor: normalized, media };
+			}
+			case "timeline.state.get":
+				return {
+					...getMcpProjectSummary(),
+					timeline: {
+						zoomRegions,
+						trimRegions,
+						speedRegions,
+						annotationRegions: annotationOnlyRegions,
+						blurRegions,
+						range: null,
+						keyframes: [],
+					},
+				};
+			case "timeline.seek": {
+				const timeMs = finiteNumber(input.timeMs) ?? 0;
+				handleSeek(timeMs / 1000);
+				return { success: true, timeMs, persisted: false };
+			}
+			case "timeline.range.set":
+				return {
+					success: false,
+					persisted: false,
+					supported: false,
+					message: "Timeline range is local to TimelineEditor.",
+				};
+			case "timeline.zoom.add": {
+				const span = getMcpSpan(input);
+				const depth = clampNumber(
+					finiteNumber(input.depth) ?? DEFAULT_ZOOM_DEPTH,
+					1,
+					6,
+				) as ZoomDepth;
+				const focus = isRecord(input.focus)
+					? {
+							cx: clampNumber(finiteNumber(input.focus.cx) ?? 0.5, 0, 1),
+							cy: clampNumber(finiteNumber(input.focus.cy) ?? 0.5, 0, 1),
+						}
+					: { cx: 0.5, cy: 0.5 };
+				const region: ZoomRegion = {
+					id: `zoom-${nextZoomIdRef.current++}`,
+					...span,
+					depth,
+					focus: clampFocusToDepth(focus, depth),
+					...(input.focusMode === "manual" || input.focusMode === "auto"
+						? { focusMode: input.focusMode }
+						: {}),
+					...(input.rotationPreset === "iso" ||
+					input.rotationPreset === "left" ||
+					input.rotationPreset === "right"
+						? { rotationPreset: input.rotationPreset }
+						: {}),
+				};
+				pushState((prev) => ({ zoomRegions: [...prev.zoomRegions, region] }));
+				handleSelectZoom(region.id);
+				return { success: true, region };
+			}
+			case "timeline.zoom.update": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.zoom.update requires id.");
+				const span =
+					isRecord(input.span) || "startMs" in input || "endMs" in input ? getMcpSpan(input) : null;
+				let region: ZoomRegion | null = null;
+				pushState((prev) => ({
+					zoomRegions: prev.zoomRegions.map((candidate) => {
+						if (candidate.id !== id) return candidate;
+						const depth = clampNumber(
+							finiteNumber(input.depth) ?? candidate.depth,
+							1,
+							6,
+						) as ZoomDepth;
+						region = {
+							...candidate,
+							...(span ?? {}),
+							depth,
+							focus: isRecord(input.focus)
+								? clampFocusToDepth(
+										{
+											cx: clampNumber(finiteNumber(input.focus.cx) ?? candidate.focus.cx, 0, 1),
+											cy: clampNumber(finiteNumber(input.focus.cy) ?? candidate.focus.cy, 0, 1),
+										},
+										depth,
+									)
+								: clampFocusToDepth(candidate.focus, depth),
+							...(input.focusMode === "manual" || input.focusMode === "auto"
+								? { focusMode: input.focusMode }
+								: {}),
+							...(input.rotationPreset === "iso" ||
+							input.rotationPreset === "left" ||
+							input.rotationPreset === "right"
+								? { rotationPreset: input.rotationPreset }
+								: {}),
+						};
+						return region;
+					}),
+				}));
+				return region ? { success: true, id, region } : { success: false, id };
+			}
+			case "timeline.zoom.delete": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.zoom.delete requires id.");
+				handleZoomDelete(id);
+				return { success: true, id };
+			}
+			case "timeline.trim.add": {
+				const span = getMcpSpan(input);
+				const region: TrimRegion = { id: `trim-${nextTrimIdRef.current++}`, ...span };
+				pushState((prev) => ({ trimRegions: [...prev.trimRegions, region] }));
+				handleSelectTrim(region.id);
+				return { success: true, region };
+			}
+			case "timeline.trim.update": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.trim.update requires id.");
+				const span = getMcpSpan(input);
+				handleTrimSpanChange(id, { start: span.startMs, end: span.endMs });
+				return { success: true, id, span };
+			}
+			case "timeline.trim.delete": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.trim.delete requires id.");
+				handleTrimDelete(id);
+				return { success: true, id };
+			}
+			case "timeline.speed.add": {
+				const span = getMcpSpan(input);
+				const region: SpeedRegion = {
+					id: `speed-${nextSpeedIdRef.current++}`,
+					...span,
+					speed: clampNumber(
+						finiteNumber(input.speed) ?? DEFAULT_PLAYBACK_SPEED,
+						0.1,
+						16,
+					) as PlaybackSpeed,
+				};
+				pushState((prev) => ({ speedRegions: [...prev.speedRegions, region] }));
+				handleSelectSpeed(region.id);
+				return { success: true, region };
+			}
+			case "timeline.speed.update": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.speed.update requires id.");
+				const span =
+					isRecord(input.span) || "startMs" in input || "endMs" in input ? getMcpSpan(input) : null;
+				let region: SpeedRegion | null = null;
+				pushState((prev) => ({
+					speedRegions: prev.speedRegions.map((candidate) => {
+						if (candidate.id !== id) return candidate;
+						region = {
+							...candidate,
+							...(span ?? {}),
+							...(finiteNumber(input.speed) !== null
+								? { speed: clampNumber(finiteNumber(input.speed)!, 0.1, 16) as PlaybackSpeed }
+								: {}),
+						};
+						return region;
+					}),
+				}));
+				return region ? { success: true, id, region } : { success: false, id };
+			}
+			case "timeline.speed.delete": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.speed.delete requires id.");
+				handleSpeedDelete(id);
+				return { success: true, id };
+			}
+			case "timeline.annotation.add":
+			case "annotations.add": {
+				const span = getMcpSpan(input);
+				const sourceAnnotation = isRecord(input.annotation) ? input.annotation : input;
+				const type =
+					sourceAnnotation.type === "image" || sourceAnnotation.type === "figure"
+						? sourceAnnotation.type
+						: "text";
+				const id = `annotation-${nextAnnotationIdRef.current++}`;
+				const zIndex = nextAnnotationZIndexRef.current++;
+				const region: AnnotationRegion = {
+					id,
+					...span,
+					type,
+					content:
+						typeof sourceAnnotation.content === "string"
+							? sourceAnnotation.content
+							: type === "text"
+								? "Enter text..."
+								: "",
+					position: isRecord(sourceAnnotation.position)
+						? {
+								x: clampNumber(finiteNumber(sourceAnnotation.position.x) ?? 50, 0, 100),
+								y: clampNumber(finiteNumber(sourceAnnotation.position.y) ?? 50, 0, 100),
+							}
+						: { ...DEFAULT_ANNOTATION_POSITION },
+					size: isRecord(sourceAnnotation.size)
+						? {
+								width: clampNumber(finiteNumber(sourceAnnotation.size.width) ?? 25, 1, 200),
+								height: clampNumber(finiteNumber(sourceAnnotation.size.height) ?? 15, 1, 200),
+							}
+						: { ...DEFAULT_ANNOTATION_SIZE },
+					style: {
+						...DEFAULT_ANNOTATION_STYLE,
+						...(isRecord(sourceAnnotation.style) ? sourceAnnotation.style : {}),
+					},
+					zIndex,
+					...(isRecord(sourceAnnotation.figureData)
+						? { figureData: sourceAnnotation.figureData as unknown as FigureData }
+						: type === "figure"
+							? { figureData: { ...DEFAULT_FIGURE_DATA } }
+							: {}),
+				};
+				pushState((prev) => ({ annotationRegions: [...prev.annotationRegions, region] }));
+				handleSelectAnnotation(id);
+				return { success: true, region };
+			}
+			case "timeline.annotation.update": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.annotation.update requires id.");
+				const span = getMcpSpan(input);
+				return updateAnnotationById(id, (region) => ({ ...region, ...span }));
+			}
+			case "timeline.annotation.delete":
+			case "annotations.delete": {
+				const id = getMcpId(input);
+				if (!id) throw new Error(`${method} requires id.`);
+				handleAnnotationDelete(id);
+				return { success: true, id };
+			}
+			case "timeline.blur.add":
+			case "blurs.add": {
+				const span = getMcpSpan(input);
+				const id = `annotation-${nextAnnotationIdRef.current++}`;
+				const zIndex = nextAnnotationZIndexRef.current++;
+				const blurData = isRecord(input.blurData)
+					? input.blurData
+					: isRecord(input.data)
+						? input.data
+						: input;
+				const region: AnnotationRegion = {
+					id,
+					...span,
+					type: "blur",
+					content: "",
+					position: isRecord(input.position)
+						? {
+								x: clampNumber(finiteNumber(input.position.x) ?? 50, 0, 100),
+								y: clampNumber(finiteNumber(input.position.y) ?? 50, 0, 100),
+							}
+						: { ...DEFAULT_ANNOTATION_POSITION },
+					size: isRecord(input.size)
+						? {
+								width: clampNumber(finiteNumber(input.size.width) ?? 25, 1, 200),
+								height: clampNumber(finiteNumber(input.size.height) ?? 15, 1, 200),
+							}
+						: { ...DEFAULT_ANNOTATION_SIZE },
+					style: { ...DEFAULT_ANNOTATION_STYLE },
+					zIndex,
+					blurData: { ...DEFAULT_BLUR_DATA, ...(isRecord(blurData) ? blurData : {}) } as BlurData,
+				};
+				pushState((prev) => ({ annotationRegions: [...prev.annotationRegions, region] }));
+				handleSelectBlur(id);
+				return { success: true, region };
+			}
+			case "timeline.blur.update": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("timeline.blur.update requires id.");
+				const span = getMcpSpan(input);
+				return updateAnnotationById(id, (region) => ({ ...region, ...span }));
+			}
+			case "timeline.blur.delete":
+			case "blurs.delete": {
+				const id = getMcpId(input);
+				if (!id) throw new Error(`${method} requires id.`);
+				handleAnnotationDelete(id);
+				return { success: true, id };
+			}
+			case "timeline.zoom.suggest":
+				return {
+					success: false,
+					supported: false,
+					message: "Cursor dwell suggestion remains a TimelineEditor-local action.",
+				};
+			case "timeline.keyframe.list":
+			case "timeline.keyframe.add":
+			case "timeline.keyframe.update":
+			case "timeline.keyframe.delete":
+				return { success: false, supported: false, keyframes: [] };
+			case "preview.state.get":
+				return getMcpProjectSummary();
+			default:
+				break;
+		}
+
+		if (method === "preview.zoom.focus.set") {
+			const id = getMcpId(input);
+			const focusInput = input.focus;
+			if (!id || !isRecord(focusInput)) {
+				throw new Error("preview.zoom.focus.set requires id and focus.");
+			}
+			const allowAutoFocusOverride = booleanValue(input.allowAutoFocusOverride) ?? false;
+			let region: ZoomRegion | null = null;
+			const update = (prev: typeof editorState) => ({
+				zoomRegions: prev.zoomRegions.map((candidate) => {
+					if (candidate.id !== id) return candidate;
+					if (candidate.focusMode === "auto" && !allowAutoFocusOverride) {
+						region = candidate;
+						return candidate;
+					}
+					region = {
+						...candidate,
+						focus: clampFocusToDepth(
+							{
+								cx: clampNumber(finiteNumber(focusInput.cx) ?? candidate.focus.cx, 0, 1),
+								cy: clampNumber(finiteNumber(focusInput.cy) ?? candidate.focus.cy, 0, 1),
+							},
+							candidate.depth,
+						),
+						focusMode: "manual",
+					};
+					return region;
+				}),
+			});
+			commit ? pushState(update) : updateState(update);
+			return region ? { success: true, id, region } : { success: false, id };
+		}
+
+		switch (method) {
+			case "preview.webcam.position.set": {
+				if (!isRecord(input.position))
+					throw new Error("preview.webcam.position.set requires position.");
+				const requirePictureInPicture = booleanValue(input.requirePictureInPicture) ?? true;
+				if (requirePictureInPicture && webcamLayoutPreset !== "picture-in-picture") {
+					return { success: false, message: "Webcam layout is not picture-in-picture." };
+				}
+				const position = {
+					cx: clampNumber(finiteNumber(input.position.cx) ?? 0.5, 0, 1),
+					cy: clampNumber(finiteNumber(input.position.cy) ?? 0.5, 0, 1),
+				};
+				return commitMcpEditorPatch({ webcamPosition: position }, commit);
+			}
+			case "preview.annotation.position.set":
+			case "preview.annotation.size.set":
+			case "annotations.position.set":
+			case "annotations.size.set": {
+				const id = getMcpId(input);
+				if (!id) throw new Error(`${method} requires id.`);
+				if (method.includes("position")) {
+					const source = isRecord(input.position) ? input.position : input;
+					return updateAnnotationById(id, (region) => ({
+						...region,
+						position: {
+							x: clampNumber(finiteNumber(source.x) ?? region.position.x, 0, 100),
+							y: clampNumber(finiteNumber(source.y) ?? region.position.y, 0, 100),
+						},
+					}));
+				}
+				const source = isRecord(input.size) ? input.size : input;
+				return updateAnnotationById(id, (region) => ({
+					...region,
+					size: {
+						width: clampNumber(finiteNumber(source.width) ?? region.size.width, 1, 200),
+						height: clampNumber(finiteNumber(source.height) ?? region.size.height, 1, 200),
+					},
+				}));
+			}
+			case "preview.blur.freehand.set": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("preview.blur.freehand.set requires id.");
+				const blurData = isRecord(input.blurData) ? input.blurData : input;
+				return updateAnnotationById(id, (region) => ({
+					...region,
+					position: { x: 0, y: 0 },
+					size: { width: 100, height: 100 },
+					blurData: { ...(region.blurData ?? DEFAULT_BLUR_DATA), ...blurData } as BlurData,
+				}));
+			}
+			case "preview.fullscreen.set":
+				setIsFullscreen(booleanValue(input.enabled) ?? false);
+				return { success: true, enabled: booleanValue(input.enabled) ?? false, persisted: false };
+			case "layout.options.get":
+				return { success: true, state: getMcpProjectSummary() };
+			case "layout.aspectRatio.set":
+			case "layout.webcamLayout.set":
+			case "layout.webcamMask.set":
+			case "layout.webcamSize.set":
+			case "effects.set":
+			case "background.set":
+			case "background.uploadImage": {
+				const patch = isRecord(input.patch) ? input.patch : input;
+				return commitMcpEditorPatch(omitUndefined(patch) as Partial<typeof editorState>, commit);
+			}
+			case "crop.get":
+				return {
+					success: true,
+					cropRegion,
+					pixels:
+						videoPlaybackRef.current?.video && input.includePixels !== false
+							? {
+									x: Math.round(cropRegion.x * videoPlaybackRef.current.video.videoWidth),
+									y: Math.round(cropRegion.y * videoPlaybackRef.current.video.videoHeight),
+									width: Math.round(cropRegion.width * videoPlaybackRef.current.video.videoWidth),
+									height: Math.round(
+										cropRegion.height * videoPlaybackRef.current.video.videoHeight,
+									),
+								}
+							: null,
+				};
+			case "crop.setNormalized":
+			case "crop.setPixels":
+			case "crop.applyAspectPreset":
+				return commitMcpEditorPatch(
+					{ cropRegion: (input.cropRegion ?? DEFAULT_CROP_REGION) as typeof cropRegion },
+					commit,
+				);
+			case "crop.reset":
+				return commitMcpEditorPatch({ cropRegion: { ...DEFAULT_CROP_REGION } }, commit);
+			case "cursorHighlight.get":
+				return {
+					success: true,
+					cursorHighlight,
+					effectiveCursorHighlight,
+					platform: isMac ? "darwin" : "other",
+				};
+			case "cursorHighlight.set":
+				return commitMcpEditorPatch(
+					{ cursorHighlight: (input.cursorHighlight ?? cursorHighlight) as typeof cursorHighlight },
+					commit,
+				);
+			case "cursorHighlight.patch":
+				return commitMcpEditorPatch(
+					{
+						cursorHighlight: {
+							...cursorHighlight,
+							...(isRecord(input.patch) ? input.patch : input),
+						},
+					},
+					commit,
+				);
+			case "annotations.list":
+				return {
+					success: true,
+					annotations: input.includeBlur === true ? annotationRegions : annotationOnlyRegions,
+				};
+			case "annotations.type.set": {
+				const id = getMcpId(input);
+				if (!id || typeof input.type !== "string")
+					throw new Error("annotations.type.set requires id and type.");
+				handleAnnotationTypeChange(id, input.type as AnnotationRegion["type"]);
+				return { success: true, id, type: input.type };
+			}
+			case "annotations.content.set": {
+				const id = getMcpId(input);
+				if (!id || typeof input.content !== "string")
+					throw new Error("annotations.content.set requires id and content.");
+				handleAnnotationContentChange(id, input.content);
+				return { success: true, id, content: input.content };
+			}
+			case "annotations.style.set": {
+				const id = getMcpId(input);
+				const style = isRecord(input.style) ? input.style : input;
+				if (!id) throw new Error("annotations.style.set requires id.");
+				handleAnnotationStyleChange(id, style as Partial<AnnotationRegion["style"]>);
+				return { success: true, id, style };
+			}
+			case "annotations.figure.set": {
+				const id = getMcpId(input);
+				const figureData = isRecord(input.figureData) ? input.figureData : input;
+				if (!id) throw new Error("annotations.figure.set requires id.");
+				handleAnnotationFigureDataChange(id, figureData as unknown as FigureData);
+				return { success: true, id, figureData };
+			}
+			case "annotations.duplicate": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("annotations.duplicate requires id.");
+				handleAnnotationDuplicate(id);
+				return { success: true, id };
+			}
+			case "blurs.list":
+				return { success: true, blurs: blurRegions };
+			case "blurs.data.set":
+			case "blurs.data.preview": {
+				const id = getMcpId(input);
+				if (!id) throw new Error(`${method} requires id.`);
+				const blurData = isRecord(input.blurData)
+					? input.blurData
+					: isRecord(input.data)
+						? input.data
+						: input;
+				return updateAnnotationById(
+					id,
+					(region) => ({
+						...region,
+						...(isRecord(input.position)
+							? { position: input.position as unknown as AnnotationRegion["position"] }
+							: {}),
+						...(isRecord(input.size)
+							? { size: input.size as unknown as AnnotationRegion["size"] }
+							: {}),
+						blurData: { ...(region.blurData ?? DEFAULT_BLUR_DATA), ...blurData } as BlurData,
+					}),
+					method === "blurs.data.set" || commit,
+				);
+			}
+			case "blurs.bounds.set": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("blurs.bounds.set requires id.");
+				return updateAnnotationById(id, (region) => ({
+					...region,
+					...(isRecord(input.position)
+						? { position: input.position as unknown as AnnotationRegion["position"] }
+						: {}),
+					...(isRecord(input.size)
+						? { size: input.size as unknown as AnnotationRegion["size"] }
+						: {}),
+				}));
+			}
+			case "customFonts.list":
+				return { success: true, fonts: getCustomFonts() };
+			case "customFonts.add": {
+				if (!isRecord(input.font)) throw new Error("customFonts.add requires font.");
+				const fonts = await addCustomFont(
+					input.font as unknown as Parameters<typeof addCustomFont>[0],
+				);
+				return { success: true, fonts };
+			}
+			case "customFonts.remove": {
+				const id = getMcpId(input);
+				if (!id) throw new Error("customFonts.remove requires id.");
+				return { success: true, fonts: removeCustomFont(id) };
+			}
+			case "export.settings.get":
+				return {
+					success: true,
+					settings: getMcpExportSettings(),
+					calculatedGifDimensions: buildMcpExportSettings({ format: "gif" }).gifConfig,
+				};
+			case "export.settings.set": {
+				const source = isRecord(input.patch) ? input.patch : input;
+				const nextSettings = buildMcpExportSettings(source);
+				setExportFormat(nextSettings.format);
+				if (nextSettings.quality) setExportQuality(nextSettings.quality);
+				if (nextSettings.gifConfig) {
+					setGifFrameRate(nextSettings.gifConfig.frameRate);
+					setGifLoop(nextSettings.gifConfig.loop);
+					setGifSizePreset(nextSettings.gifConfig.sizePreset);
+				}
+				if (input.persistToPreferences !== false) {
+					saveUserPreferences({
+						exportFormat: nextSettings.format,
+						...(nextSettings.quality ? { exportQuality: nextSettings.quality } : {}),
+					});
+				}
+				return { success: true, settings: nextSettings };
+			}
+			case "export.start": {
+				if (!videoPath || !videoPlaybackRef.current?.video) {
+					return { success: false, message: "Video is not ready." };
+				}
+				const settings = buildMcpExportSettings(isRecord(input.settings) ? input.settings : input);
+				await handleExport(settings);
+				return { success: true, settings };
+			}
+			case "export.cancel":
+				handleCancelExport();
+				return { success: true };
+			case "export.savePending":
+				await handleSaveUnsavedExport();
+				return { success: true };
+			case "shortcuts.get":
+				return { success: true, shortcuts, isMac };
+			case "shortcuts.apply":
+				if (!isRecord(input.shortcuts)) throw new Error("shortcuts.apply requires shortcuts.");
+				setShortcuts(input.shortcuts as ShortcutsConfig);
+				return { success: true, shortcuts: input.shortcuts };
+			case "preferences.get":
+				return { success: true, preferences: loadUserPreferences() };
+			case "preferences.set": {
+				const patch = isRecord(input.patch) ? input.patch : input;
+				saveUserPreferences(patch);
+				const editorPatch: Partial<typeof editorState> = {};
+				if (typeof patch.padding === "number") editorPatch.padding = patch.padding;
+				if (typeof patch.aspectRatio === "string")
+					editorPatch.aspectRatio = patch.aspectRatio as typeof aspectRatio;
+				if (Object.keys(editorPatch).length > 0) pushState(editorPatch);
+				if (
+					patch.exportQuality === "medium" ||
+					patch.exportQuality === "good" ||
+					patch.exportQuality === "source"
+				) {
+					setExportQuality(patch.exportQuality);
+				}
+				if (patch.exportFormat === "mp4" || patch.exportFormat === "gif") {
+					setExportFormat(patch.exportFormat);
+				}
+				return { success: true, preferences: loadUserPreferences() };
+			}
+			case "locale.get":
+				return {
+					success: true,
+					locale,
+					availableLocales,
+				};
+			case "locale.set":
+				if (typeof input.locale !== "string") throw new Error("locale.set requires locale.");
+				setLocale(input.locale as Locale);
+				return { success: true, locale: input.locale };
+			default:
+				throw new Error(`Unsupported editor MCP command: ${method}`);
+		}
+	};
+
+	useEffect(() => {
+		const cleanup = window.electronAPI.onMcpCommand?.("editor", (method, args) =>
+			mcpEditorCommandHandlerRef.current(method, args),
+		);
+		window.electronAPI.notifyMcpTargetReady?.("editor");
+		return () => cleanup?.();
 	}, []);
 
 	if (loading) {

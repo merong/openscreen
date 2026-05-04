@@ -13,7 +13,29 @@ import {
 	Tray,
 } from "electron";
 import { mainT, setMainLocale } from "./i18n";
-import { registerIpcHandlers } from "./ipc/handlers";
+import {
+	getCurrentRecordingSessionState,
+	getCursorTelemetryForVideo,
+	getPersistedShortcuts,
+	getSelectedDesktopSource,
+	listDesktopSources,
+	loadProjectFileFromDialog,
+	openVideoFileFromDialog,
+	registerIpcHandlers,
+	requestAccessibilityAccessState,
+	revealInFolderPath,
+	savePersistedShortcuts,
+	selectDesktopSource,
+	setCurrentVideoPathState,
+	startNewRecordingState,
+} from "./ipc/handlers";
+import { createRendererCommandBus } from "./mcp/RendererCommandBus";
+import { createOpenScreenMcpResources } from "./mcp/resources";
+import type { McpHttpServerController } from "./mcp/server";
+import { startMcpServer } from "./mcp/server";
+import type { OpenScreenMcpToolContext } from "./mcp/tools";
+import type { RendererCommandTarget } from "./mcp/toolTypes";
+import { RECORDINGS_DIR } from "./paths";
 import {
 	createCountdownOverlayWindow,
 	createEditorWindow,
@@ -41,8 +63,6 @@ if (process.platform === "linux") {
 		app.commandLine.appendSwitch("enable-features", "WaylandWindowDrag,WebRTCPipeWireCapturer");
 	}
 }
-
-export const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 
 async function ensureRecordingsDir() {
 	try {
@@ -80,6 +100,7 @@ let sourceSelectorWindow: BrowserWindow | null = null;
 let countdownOverlayWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let selectedSourceName = "";
+let mcpServerController: McpHttpServerController | null = null;
 const isMac = process.platform === "darwin";
 const trayIconSize = isMac ? 16 : 24;
 
@@ -330,6 +351,8 @@ function createEditorWindowWrapper() {
 		}
 		// choice === 2: Cancel — do nothing, window stays open
 	});
+
+	return mainWindow;
 }
 
 function createSourceSelectorWindowWrapper() {
@@ -374,6 +397,14 @@ app.on("activate", () => {
 	if (!hasVisibleWindow) {
 		showMainWindow();
 	}
+});
+
+app.on("before-quit", () => {
+	if (!mcpServerController) return;
+	void mcpServerController.close().catch((error) => {
+		console.warn("[mcp] Failed to close MCP server:", error);
+	});
+	mcpServerController = null;
 });
 
 // Register all IPC handlers when app is ready
@@ -428,6 +459,83 @@ app.whenReady().then(async () => {
 			mainWindow = null;
 		}
 		showMainWindow();
+		return mainWindow;
+	}
+
+	function getWindowType(window: BrowserWindow | null) {
+		if (!window || window.isDestroyed()) {
+			return null;
+		}
+
+		const url = window.webContents.getURL();
+		if (url.includes("windowType=editor")) {
+			return "editor";
+		}
+		if (url.includes("windowType=hud-overlay")) {
+			return "hud";
+		}
+		return null;
+	}
+
+	function getMcpTargetWindow(target: RendererCommandTarget) {
+		const expectedType = target === "editor" ? "editor" : "hud";
+		if (getWindowType(mainWindow) === expectedType) {
+			return mainWindow;
+		}
+
+		return (
+			BrowserWindow.getAllWindows().find(
+				(window) => !window.isDestroyed() && getWindowType(window) === expectedType,
+			) ?? null
+		);
+	}
+
+	function ensureMcpTargetWindow(target: RendererCommandTarget) {
+		const existing = getMcpTargetWindow(target);
+		if (existing) {
+			if (existing.isMinimized()) {
+				existing.restore();
+			}
+			existing.show();
+			if (target === "editor") {
+				existing.focus();
+			}
+			return existing;
+		}
+
+		return target === "editor" ? createEditorWindowWrapper() : switchToHudWrapper();
+	}
+
+	function getMcpWindowStatus() {
+		const hudWindow = getMcpTargetWindow("hud");
+		const editorWindow = getMcpTargetWindow("editor");
+		return {
+			hud: hudWindow
+				? {
+						visible: hudWindow.isVisible(),
+						loading: hudWindow.webContents.isLoading(),
+					}
+				: null,
+			editor: editorWindow
+				? {
+						visible: editorWindow.isVisible(),
+						loading: editorWindow.webContents.isLoading(),
+						hasUnsavedChanges: editorHasUnsavedChanges,
+					}
+				: null,
+			sourceSelector: sourceSelectorWindow
+				? {
+						visible: sourceSelectorWindow.isVisible(),
+						loading: sourceSelectorWindow.webContents.isLoading(),
+					}
+				: null,
+			countdownOverlay: countdownOverlayWindow
+				? {
+						visible: countdownOverlayWindow.isVisible(),
+						loading: countdownOverlayWindow.webContents.isLoading(),
+					}
+				: null,
+		};
 	}
 
 	registerIpcHandlers(
@@ -447,5 +555,81 @@ app.whenReady().then(async () => {
 		},
 		switchToHudWrapper,
 	);
+
+	const commandBus = createRendererCommandBus({
+		getWindow: getMcpTargetWindow,
+		ensureWindow: ensureMcpTargetWindow,
+	});
+	const toolContext: OpenScreenMcpToolContext = {
+		commandBus,
+		sources: {
+			list: listDesktopSources,
+			select: async (source) =>
+				selectDesktopSource(source, () => sourceSelectorWindow) as ProcessedDesktopSource | null,
+			getSelected: () => getSelectedDesktopSource() as ProcessedDesktopSource | null,
+		},
+		media: {
+			openVideoFilePicker: () => openVideoFileFromDialog(() => mainWindow),
+			setCurrentVideoPath: setCurrentVideoPathState,
+			getCurrentRecordingSession: getCurrentRecordingSessionState,
+			getCursorTelemetry: getCursorTelemetryForVideo,
+		},
+		project: {
+			loadProjectFile: () => loadProjectFileFromDialog(() => mainWindow),
+			startNewRecording: () => startNewRecordingState(switchToHudWrapper),
+		},
+		windows: {
+			switchToEditor: () => createEditorWindowWrapper(),
+		},
+		locale: {
+			setMainLocale: (locale: string) => {
+				setMainLocale(locale);
+				setupApplicationMenu();
+				updateTrayMenu();
+			},
+		},
+		platform: {
+			isMac,
+			name: process.platform,
+		},
+		permissions: {
+			requestAccessibilityAccess: requestAccessibilityAccessState,
+		},
+		files: {
+			revealInFolder: revealInFolderPath,
+		},
+		shortcuts: {
+			getShortcuts: getPersistedShortcuts,
+			saveShortcuts: savePersistedShortcuts,
+		},
+	};
+	const resources = createOpenScreenMcpResources({
+		app: {
+			getName: () => app.getName(),
+			getVersion: () => app.getVersion(),
+		},
+		windows: {
+			getStatus: getMcpWindowStatus,
+		},
+		tools: toolContext,
+		server: {
+			getStatus: () => mcpServerController?.getStatus() ?? { running: false },
+		},
+	});
+
+	try {
+		mcpServerController = await startMcpServer({
+			host: "127.0.0.1",
+			port: 18888,
+			path: "/mcp",
+			context: toolContext,
+			resources,
+			appVersion: app.getVersion(),
+		});
+		console.log(`[mcp] Streamable HTTP server listening at ${mcpServerController.url}`);
+	} catch (error) {
+		console.error("[mcp] Failed to start Streamable HTTP server:", error);
+	}
+
 	createWindow();
 });

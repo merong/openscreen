@@ -96,6 +96,12 @@ export function LaunchWindow() {
 		togglePaused,
 		restartRecording,
 		cancelRecording,
+		startRecordingCommand,
+		stopRecordingCommand,
+		pauseRecordingCommand,
+		resumeRecordingCommand,
+		restartRecordingCommand,
+		cancelRecordingCommand,
 		microphoneEnabled,
 		setMicrophoneEnabled,
 		microphoneDeviceId,
@@ -312,6 +318,92 @@ export function LaunchWindow() {
 			setMicrophoneEnabled(!microphoneEnabled);
 		}
 	};
+
+	const mcpHudCommandHandlerRef = useRef<
+		(method: string, args: unknown) => Promise<unknown> | unknown
+	>(async () => ({ success: false, message: "HUD MCP handler is not ready." }));
+
+	mcpHudCommandHandlerRef.current = async (method: string, args: unknown) => {
+		const record = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+		const input = record as Record<string, unknown>;
+		const state = () => ({
+			success: true,
+			recording,
+			paused,
+			elapsedSeconds,
+			countdownActive: false,
+			options: {
+				systemAudioEnabled,
+				microphoneEnabled,
+				microphoneDeviceId,
+				webcamEnabled,
+				webcamDeviceId,
+			},
+			selectedSource,
+			hasSelectedSource,
+			locale,
+		});
+
+		switch (method) {
+			case "recording.state.get":
+				return state();
+			case "recording.options.set": {
+				if (typeof input.systemAudioEnabled === "boolean" && !recording) {
+					setSystemAudioEnabled(input.systemAudioEnabled);
+				}
+				if (typeof input.microphoneEnabled === "boolean" && !recording) {
+					setMicrophoneEnabled(input.microphoneEnabled);
+				}
+				if (typeof input.microphoneDeviceId === "string" && input.microphoneDeviceId.trim()) {
+					setMicrophoneDeviceId(input.microphoneDeviceId);
+					setSelectedMicId(input.microphoneDeviceId);
+				}
+				if (typeof input.webcamEnabled === "boolean" && !recording) {
+					await setWebcamEnabled(input.webcamEnabled);
+				}
+				if (typeof input.webcamDeviceId === "string" && input.webcamDeviceId.trim()) {
+					setWebcamDeviceId(input.webcamDeviceId);
+					setSelectedCameraId(input.webcamDeviceId);
+				}
+				return {
+					...state(),
+					applied: input,
+				};
+			}
+			case "recording.start":
+				return startRecordingCommand({
+					countdownSeconds: typeof input.countdownSeconds === "number" ? input.countdownSeconds : 3,
+				});
+			case "recording.stop":
+				return stopRecordingCommand();
+			case "recording.pause":
+				return pauseRecordingCommand();
+			case "recording.resume":
+				return resumeRecordingCommand();
+			case "recording.restart":
+				return restartRecordingCommand();
+			case "recording.cancel":
+				return cancelRecordingCommand();
+			case "locale.set": {
+				if (typeof input.locale !== "string") {
+					throw new Error("locale.set requires a locale string.");
+				}
+				setLocale(input.locale as typeof locale);
+				resolveSystemLocaleSuggestion();
+				return { success: true, locale: input.locale };
+			}
+			default:
+				throw new Error(`Unsupported HUD MCP command: ${method}`);
+		}
+	};
+
+	useEffect(() => {
+		const cleanup = window.electronAPI.onMcpCommand?.("hud", (method, args) =>
+			mcpHudCommandHandlerRef.current(method, args),
+		);
+		window.electronAPI.notifyMcpTargetReady?.("hud");
+		return () => cleanup?.();
+	}, []);
 
 	return (
 		// Root fills the HUD window only. Avoid w-screen/h-screen (100vw/100vh):

@@ -27,7 +27,7 @@ import {
 	type StoreRecordedSessionInput,
 } from "../../src/lib/recordingSession";
 import { mainT } from "../i18n";
-import { RECORDINGS_DIR } from "../main";
+import { RECORDINGS_DIR } from "../paths";
 
 const PROJECT_FILE_EXTENSION = "openscreen";
 const SHORTCUTS_FILE = path.join(app.getPath("userData"), "shortcuts.json");
@@ -185,9 +185,12 @@ async function getApprovedProjectSession(
 		: { screenVideoPath, createdAt: Date.now() };
 }
 
-type SelectedSource = {
+export type SelectedSource = {
+	id?: string;
 	name: string;
-	[key: string]: unknown;
+	display_id?: string;
+	thumbnail?: string | null;
+	appIcon?: string | null;
 };
 
 let selectedSource: SelectedSource | null = null;
@@ -474,6 +477,371 @@ function sampleCursorPoint() {
 		cx,
 		cy,
 	});
+}
+
+export async function listDesktopSources(
+	opts: Electron.SourcesOptions,
+): Promise<Array<SelectedSource & ProcessedDesktopSourceShape>> {
+	const ownWindowSourceIds = new Set(
+		BrowserWindow.getAllWindows()
+			.map((win) => {
+				try {
+					return win.getMediaSourceId();
+				} catch {
+					return null;
+				}
+			})
+			.filter((id): id is string => Boolean(id)),
+	);
+	const sources = await desktopCapturer.getSources(opts);
+	return sources
+		.filter((source) => !ownWindowSourceIds.has(source.id))
+		.map((source) => ({
+			id: source.id,
+			name: source.name,
+			display_id: source.display_id,
+			thumbnail: source.thumbnail ? source.thumbnail.toDataURL() : null,
+			appIcon: source.appIcon ? source.appIcon.toDataURL() : null,
+		}));
+}
+
+export type ProcessedDesktopSourceShape = {
+	id: string;
+	display_id: string;
+	thumbnail: string | null;
+	appIcon: string | null;
+};
+
+export function selectDesktopSource(
+	source: SelectedSource & Partial<ProcessedDesktopSourceShape>,
+	getSourceSelectorWindow?: () => BrowserWindow | null,
+) {
+	selectedSource = source;
+	const sourceSelectorWin = getSourceSelectorWindow?.();
+	if (sourceSelectorWin && !sourceSelectorWin.isDestroyed()) {
+		sourceSelectorWin.close();
+	}
+	return selectedSource as (SelectedSource & Partial<ProcessedDesktopSourceShape>) | null;
+}
+
+export function getSelectedDesktopSource() {
+	return selectedSource as (SelectedSource & Partial<ProcessedDesktopSourceShape>) | null;
+}
+
+export async function getRecordedVideoPathState() {
+	try {
+		if (currentRecordingSession?.screenVideoPath) {
+			return { success: true, path: currentRecordingSession.screenVideoPath };
+		}
+
+		const files = await fs.readdir(RECORDINGS_DIR);
+		const videoFiles = files.filter(
+			(file) => file.endsWith(".webm") && !file.endsWith("-webcam.webm"),
+		);
+
+		if (videoFiles.length === 0) {
+			return { success: false, message: "No recorded video found" };
+		}
+
+		let latestVideo: string | null = null;
+		let latestMtimeMs = 0;
+		for (const file of videoFiles) {
+			try {
+				const stat = await fs.stat(path.join(RECORDINGS_DIR, file));
+				if (stat.mtimeMs > latestMtimeMs) {
+					latestMtimeMs = stat.mtimeMs;
+					latestVideo = file;
+				}
+			} catch {
+				// Skip inaccessible files.
+			}
+		}
+		if (!latestVideo) {
+			return { success: false, message: "No recorded video found" };
+		}
+
+		return { success: true, path: path.join(RECORDINGS_DIR, latestVideo) };
+	} catch (error) {
+		console.error("Failed to get video path:", error);
+		return { success: false, message: "Failed to get video path", error: String(error) };
+	}
+}
+
+export async function getCursorTelemetryForVideo(videoPath?: string) {
+	const targetVideoPath = normalizeVideoSourcePath(
+		videoPath ?? currentRecordingSession?.screenVideoPath,
+	);
+	if (!targetVideoPath) {
+		return { success: true, samples: [], clicks: [] };
+	}
+
+	if (!isPathAllowed(targetVideoPath)) {
+		console.warn(
+			"[get-cursor-telemetry] Rejected path outside allowed directories:",
+			targetVideoPath,
+		);
+		return { success: true, samples: [], clicks: [] };
+	}
+
+	const telemetryPath = `${targetVideoPath}.cursor.json`;
+	try {
+		const content = await fs.readFile(telemetryPath, "utf-8");
+		const parsed = JSON.parse(content);
+		const rawSamples = Array.isArray(parsed)
+			? parsed
+			: Array.isArray(parsed?.samples)
+				? parsed.samples
+				: [];
+
+		const samples: CursorTelemetryPoint[] = rawSamples
+			.filter((sample: unknown) => Boolean(sample && typeof sample === "object"))
+			.map((sample: unknown) => {
+				const point = sample as Partial<CursorTelemetryPoint>;
+				return {
+					timeMs:
+						typeof point.timeMs === "number" && Number.isFinite(point.timeMs)
+							? Math.max(0, point.timeMs)
+							: 0,
+					cx:
+						typeof point.cx === "number" && Number.isFinite(point.cx) ? clamp(point.cx, 0, 1) : 0.5,
+					cy:
+						typeof point.cy === "number" && Number.isFinite(point.cy) ? clamp(point.cy, 0, 1) : 0.5,
+				};
+			})
+			.sort((a: CursorTelemetryPoint, b: CursorTelemetryPoint) => a.timeMs - b.timeMs);
+
+		const rawClicks = Array.isArray(parsed?.clicks) ? parsed.clicks : [];
+		const clicks: number[] = rawClicks
+			.map((value: unknown) =>
+				typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : null,
+			)
+			.filter((v: number | null): v is number => v !== null)
+			.sort((a: number, b: number) => a - b);
+
+		return { success: true, samples, clicks };
+	} catch (error) {
+		const nodeError = error as NodeJS.ErrnoException;
+		if (nodeError.code === "ENOENT") {
+			return { success: true, samples: [], clicks: [] };
+		}
+		console.error("Failed to load cursor telemetry:", error);
+		return {
+			success: false,
+			message: "Failed to load cursor telemetry",
+			error: String(error),
+			samples: [],
+			clicks: [],
+		};
+	}
+}
+
+export function requestAccessibilityAccessState() {
+	if (process.platform !== "darwin") {
+		return { success: true, granted: true };
+	}
+	try {
+		const granted = systemPreferences.isTrustedAccessibilityClient(true);
+		return { success: true, granted };
+	} catch (error) {
+		console.error("Failed to request accessibility access:", error);
+		return { success: false, granted: false, error: String(error) };
+	}
+}
+
+export async function openVideoFileFromDialog(getMainWindow: () => BrowserWindow | null) {
+	try {
+		const dialogOptions = buildDialogOptions(
+			{
+				title: mainT("dialogs", "fileDialogs.selectVideo"),
+				defaultPath: RECORDINGS_DIR,
+				filters: [
+					{
+						name: mainT("dialogs", "fileDialogs.videoFiles"),
+						extensions: ["webm", "mp4", "mov", "avi", "mkv"],
+					},
+					{ name: mainT("dialogs", "fileDialogs.allFiles"), extensions: ["*"] },
+				],
+				properties: ["openFile"],
+			},
+			getMainWindow(),
+		);
+		const result = await dialog.showOpenDialog(dialogOptions);
+
+		if (result.canceled || result.filePaths.length === 0) {
+			return { success: false, canceled: true };
+		}
+
+		const approvedPath = await approveReadableVideoPath(result.filePaths[0]);
+		if (!approvedPath) {
+			return {
+				success: false,
+				message: "Selected file is not a supported video",
+			};
+		}
+		currentProjectPath = null;
+		return {
+			success: true,
+			path: approvedPath,
+		};
+	} catch (error) {
+		console.error("Failed to open file picker:", error);
+		return {
+			success: false,
+			message: "Failed to open file picker",
+			error: String(error),
+		};
+	}
+}
+
+export async function revealInFolderPath(filePath: string) {
+	try {
+		shell.showItemInFolder(filePath);
+		return { success: true };
+	} catch (error) {
+		console.error(`Error revealing item in folder: ${filePath}`, error);
+		try {
+			const openPathResult = await shell.openPath(path.dirname(filePath));
+			if (openPathResult) {
+				return { success: false, error: openPathResult };
+			}
+			return { success: true, message: "Could not reveal item, but opened directory." };
+		} catch (openError) {
+			console.error(`Error opening directory: ${path.dirname(filePath)}`, openError);
+			return { success: false, error: String(error) };
+		}
+	}
+}
+
+export async function loadProjectFileFromDialog(getMainWindow: () => BrowserWindow | null) {
+	try {
+		const dialogOptions = buildDialogOptions(
+			{
+				title: mainT("dialogs", "fileDialogs.openProject"),
+				defaultPath: RECORDINGS_DIR,
+				filters: [
+					{
+						name: mainT("dialogs", "fileDialogs.openscreenProject"),
+						extensions: [PROJECT_FILE_EXTENSION],
+					},
+					{ name: "JSON", extensions: ["json"] },
+					{ name: mainT("dialogs", "fileDialogs.allFiles"), extensions: ["*"] },
+				],
+				properties: ["openFile"],
+			},
+			getMainWindow(),
+		);
+		const result = await dialog.showOpenDialog(dialogOptions);
+
+		if (result.canceled || result.filePaths.length === 0) {
+			return { success: false, canceled: true, message: "Open project canceled" };
+		}
+
+		const filePath = result.filePaths[0];
+		const content = await fs.readFile(filePath, "utf-8");
+		const project = JSON.parse(content);
+		const session = await getApprovedProjectSession(project, filePath);
+		currentProjectPath = filePath;
+		setCurrentRecordingSessionState(session);
+
+		return {
+			success: true,
+			path: filePath,
+			project,
+		};
+	} catch (error) {
+		console.error("Failed to load project file:", error);
+		return {
+			success: false,
+			message: "Failed to load project file",
+			error: String(error),
+		};
+	}
+}
+
+export async function loadCurrentProjectFileFromDisk() {
+	try {
+		if (!currentProjectPath) {
+			return { success: false, message: "No active project" };
+		}
+
+		const content = await fs.readFile(currentProjectPath, "utf-8");
+		const project = JSON.parse(content);
+		const session = await getApprovedProjectSession(project, currentProjectPath);
+		setCurrentRecordingSessionState(session);
+		return {
+			success: true,
+			path: currentProjectPath,
+			project,
+		};
+	} catch (error) {
+		console.error("Failed to load current project file:", error);
+		return {
+			success: false,
+			message: "Failed to load current project file",
+			error: String(error),
+		};
+	}
+}
+
+export async function setCurrentVideoPathState(inputPath: string) {
+	const normalizedPath = normalizeVideoSourcePath(inputPath);
+	if (!normalizedPath || !isPathAllowed(normalizedPath)) {
+		return { success: false, message: "Video path has not been approved" };
+	}
+
+	const restoredSession = await loadRecordedSessionForVideoPath(normalizedPath);
+	if (restoredSession) {
+		approveFilePath(restoredSession.screenVideoPath);
+		if (restoredSession.webcamVideoPath) {
+			approveFilePath(restoredSession.webcamVideoPath);
+		}
+		setCurrentRecordingSessionState(restoredSession);
+	} else {
+		setCurrentRecordingSessionState({
+			screenVideoPath: normalizedPath,
+			createdAt: Date.now(),
+		});
+	}
+	currentProjectPath = null;
+	return { success: true };
+}
+
+export function getCurrentRecordingSessionState() {
+	return currentRecordingSession
+		? { success: true, session: currentRecordingSession }
+		: { success: false };
+}
+
+export function startNewRecordingState(switchToHud?: () => void) {
+	try {
+		setCurrentRecordingSessionState(null);
+		if (switchToHud) {
+			switchToHud();
+		}
+		return { success: true };
+	} catch (error) {
+		console.error("Failed to start new recording:", error);
+		return { success: false, error: String(error) };
+	}
+}
+
+export async function getPersistedShortcuts() {
+	try {
+		const data = await fs.readFile(SHORTCUTS_FILE, "utf-8");
+		return JSON.parse(data);
+	} catch {
+		return null;
+	}
+}
+
+export async function savePersistedShortcuts(shortcuts: unknown) {
+	try {
+		await fs.writeFile(SHORTCUTS_FILE, JSON.stringify(shortcuts, null, 2), "utf-8");
+		return { success: true };
+	} catch (error) {
+		console.error("Failed to save shortcuts:", error);
+		return { success: false, error: String(error) };
+	}
 }
 
 export function registerIpcHandlers(

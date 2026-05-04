@@ -47,6 +47,14 @@ type UseScreenRecorderReturn = {
 	togglePaused: () => void;
 	restartRecording: () => void;
 	cancelRecording: () => void;
+	startRecordingCommand: (options?: {
+		countdownSeconds?: number;
+	}) => Promise<Record<string, unknown>>;
+	stopRecordingCommand: () => Record<string, unknown>;
+	pauseRecordingCommand: () => Record<string, unknown>;
+	resumeRecordingCommand: () => Record<string, unknown>;
+	restartRecordingCommand: () => Promise<Record<string, unknown>>;
+	cancelRecordingCommand: () => Record<string, unknown>;
 	microphoneEnabled: boolean;
 	setMicrophoneEnabled: (enabled: boolean) => void;
 	microphoneDeviceId: string | undefined;
@@ -488,8 +496,14 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const isCountdownRunActive = (runId?: number) =>
 		runId === undefined || countdownRunId.current === runId;
 
-	const startRecordCountdown = async () => {
+	const startRecordCountdown = async (countdownSeconds = 3) => {
 		if (countdownActive || recording) {
+			return;
+		}
+
+		const normalizedCountdownSeconds = Math.max(0, Math.round(countdownSeconds));
+		if (normalizedCountdownSeconds <= 0) {
+			await startRecording();
 			return;
 		}
 
@@ -518,7 +532,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 		let overlayHiddenBeforeStart = false;
 		try {
-			const values = [3, 2, 1];
+			const values = Array.from({ length: normalizedCountdownSeconds }, (_, index) => {
+				return normalizedCountdownSeconds - index;
+			});
 			const overlayShown = await safeShowCountdownOverlay(values[0], runId);
 
 			if (countdownRunId.current !== runId) {
@@ -947,6 +963,68 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 	};
 
+	const startRecordingCommand = async (options?: { countdownSeconds?: number }) => {
+		if (recording) {
+			return { success: false, message: "Recording is already active." };
+		}
+		if (countdownActive) {
+			return { success: false, message: "Recording countdown is already active." };
+		}
+
+		await startRecordCountdown(options?.countdownSeconds ?? 3);
+		return { success: true, countdownSeconds: options?.countdownSeconds ?? 3 };
+	};
+
+	const stopRecordingCommand = () => {
+		if (!recording && !countdownActive) {
+			return { success: false, message: "No recording is active." };
+		}
+		if (countdownActive) {
+			cancelCountdown();
+			return { success: true, canceledCountdown: true };
+		}
+		stopRecording.current();
+		return { success: true };
+	};
+
+	const pauseRecordingCommand = () => {
+		if (!recording) {
+			return { success: false, message: "No recording is active." };
+		}
+		if (paused) {
+			return { success: true, paused: true };
+		}
+		togglePaused();
+		return { success: true, paused: true };
+	};
+
+	const resumeRecordingCommand = () => {
+		if (!recording) {
+			return { success: false, message: "No recording is active." };
+		}
+		if (!paused) {
+			return { success: true, paused: false };
+		}
+		togglePaused();
+		return { success: true, paused: false };
+	};
+
+	const restartRecordingCommand = async () => {
+		if (!recording) {
+			return { success: false, message: "No recording is active." };
+		}
+		await restartRecording();
+		return { success: true };
+	};
+
+	const cancelRecordingCommand = () => {
+		if (!recording && !countdownActive) {
+			return { success: false, message: "No recording is active." };
+		}
+		cancelRecording();
+		return { success: true };
+	};
+
 	return {
 		recording,
 		paused,
@@ -955,6 +1033,12 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		togglePaused,
 		restartRecording,
 		cancelRecording,
+		startRecordingCommand,
+		stopRecordingCommand,
+		pauseRecordingCommand,
+		resumeRecordingCommand,
+		restartRecordingCommand,
+		cancelRecordingCommand,
 		microphoneEnabled,
 		setMicrophoneEnabled,
 		microphoneDeviceId,

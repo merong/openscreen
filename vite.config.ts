@@ -11,11 +11,23 @@ export default defineConfig({
 			main: {
 				entry: "electron/main.ts",
 				vite: {
+					resolve: {
+						alias: {
+							"@": path.resolve(__dirname, "src"),
+						},
+					},
 					build: {},
 				},
 			},
 			preload: {
 				input: path.join(__dirname, "electron/preload.ts"),
+				vite: {
+					resolve: {
+						alias: {
+							"@": path.resolve(__dirname, "src"),
+						},
+					},
+				},
 			},
 			renderer: process.env.NODE_ENV === "test" ? undefined : {},
 		}),
