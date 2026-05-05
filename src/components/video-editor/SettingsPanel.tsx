@@ -281,7 +281,7 @@ export function SettingsPanel({
 	borderRadius = 0,
 	onBorderRadiusChange,
 	onBorderRadiusCommit,
-	padding = 50,
+	padding = 0,
 	onPaddingChange,
 	onPaddingCommit,
 	cropRegion,

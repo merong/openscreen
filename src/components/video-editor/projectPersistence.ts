@@ -458,7 +458,7 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 					: 0
 				: 0,
 		borderRadius: typeof editor.borderRadius === "number" ? editor.borderRadius : 0,
-		padding: isFiniteNumber(editor.padding) ? clamp(editor.padding, 0, 100) : 50,
+		padding: isFiniteNumber(editor.padding) ? clamp(editor.padding, 0, 100) : 0,
 		cropRegion: {
 			x: cropX,
 			y: cropY,

@@ -26,7 +26,7 @@ export interface UserPreferences {
 }
 
 const DEFAULT_PREFS: UserPreferences = {
-	padding: 50,
+	padding: 0,
 	aspectRatio: "16:9",
 	exportQuality: "good",
 	exportFormat: "mp4",

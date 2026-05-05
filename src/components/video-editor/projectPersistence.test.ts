@@ -68,6 +68,10 @@ describe("projectPersistence media compatibility", () => {
 		).toBe("rectangle");
 	});
 
+	it("uses minimal padding when legacy projects do not store padding", () => {
+		expect(normalizeProjectEditor({}).padding).toBe(0);
+	});
+
 	it("normalizes blur region type and mosaic block size safely", () => {
 		const editor = normalizeProjectEditor({
 			annotationRegions: [

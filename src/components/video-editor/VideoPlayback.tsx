@@ -167,7 +167,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			showBlur,
 			motionBlurAmount = 0,
 			borderRadius = 0,
-			padding = 50,
+			padding = 0,
 			cropRegion,
 			trimRegions = [],
 			speedRegions = [],
