@@ -92,6 +92,16 @@
 		corner-shape: squircle;
 	}
 
+	.mcp-terminal .xterm {
+		height: 100%;
+		padding: 10px 12px;
+	}
+
+	.mcp-terminal .xterm-viewport,
+	.mcp-terminal .xterm-screen {
+		background-color: transparent !important;
+	}
+
 	/* Smooth playback scrubber */
 	input[type="range"] {
 		-webkit-appearance: none;

@@ -227,7 +227,7 @@ function createSdkServer(
 				resources: { listChanged: false },
 			},
 			instructions:
-				"Use these tools to inspect and control the local OpenScreen desktop app. Mutating tools are serialized by the app.",
+				"Use these tools to inspect and control the local OpenScreen desktop app. Before editing, read openscreen://editing/guide, openscreen://editing/feature-index, and the relevant feature documents referenced by tools. Mutating tools are serialized by the app.",
 		},
 	);
 
@@ -280,7 +280,7 @@ function createSdkServer(
 				{
 					uri: resource.uri,
 					mimeType: resource.mimeType,
-					text: JSON.stringify(content, null, 2),
+					text: typeof content === "string" ? content : JSON.stringify(content, null, 2),
 				},
 			],
 		};
@@ -427,6 +427,7 @@ export async function startMcpServer(
 	return {
 		url,
 		getStatus: () => ({
+			running: true,
 			url,
 			host,
 			port: address.port,

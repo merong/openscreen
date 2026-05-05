@@ -3,6 +3,12 @@ import type { RecordingSession, StoreRecordedSessionInput } from "../src/lib/rec
 
 type McpCommandTarget = "hud" | "editor";
 type McpCommandHandler = (method: string, args: unknown) => Promise<unknown> | unknown;
+type TerminalCreateOptions = {
+	sessionId: string;
+	cols: number;
+	rows: number;
+	mode?: "shell";
+};
 
 // Asset base URL is passed from the main process via webPreferences.additionalArguments
 // (see windows.ts). Sandboxed preloads cannot import node:path / node:url, so we
@@ -136,6 +142,52 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	},
 	setLocale: (locale: string) => {
 		return ipcRenderer.invoke("set-locale", locale);
+	},
+	getMcpServerStatus: () => {
+		return ipcRenderer.invoke("mcp:get-server-status");
+	},
+	createTerminal: (options: TerminalCreateOptions) => {
+		return ipcRenderer.invoke("terminal:create", options);
+	},
+	getMcpClientConfig: () => {
+		return ipcRenderer.invoke("mcp-client-config:get");
+	},
+	writeTerminal: (sessionId: string, data: string) => {
+		ipcRenderer.send("terminal:write", { sessionId, data });
+	},
+	resizeTerminal: (sessionId: string, cols: number, rows: number) => {
+		ipcRenderer.send("terminal:resize", { sessionId, cols, rows });
+	},
+	killTerminal: (sessionId: string) => {
+		ipcRenderer.send("terminal:kill", { sessionId });
+	},
+	onTerminalData: (sessionId: string, callback: (data: string) => void) => {
+		const listener = (_event: unknown, payload: unknown) => {
+			if (!payload || typeof payload !== "object") return;
+			const message = payload as { sessionId?: unknown; data?: unknown };
+			if (message.sessionId === sessionId && typeof message.data === "string") {
+				callback(message.data);
+			}
+		};
+		ipcRenderer.on("terminal:data", listener);
+		return () => ipcRenderer.removeListener("terminal:data", listener);
+	},
+	onTerminalExit: (
+		sessionId: string,
+		callback: (event: { exitCode: number; signal?: number }) => void,
+	) => {
+		const listener = (_event: unknown, payload: unknown) => {
+			if (!payload || typeof payload !== "object") return;
+			const message = payload as { sessionId?: unknown; exitCode?: unknown; signal?: unknown };
+			if (message.sessionId === sessionId && typeof message.exitCode === "number") {
+				callback({
+					exitCode: message.exitCode,
+					...(typeof message.signal === "number" ? { signal: message.signal } : {}),
+				});
+			}
+		};
+		ipcRenderer.on("terminal:exit", listener);
+		return () => ipcRenderer.removeListener("terminal:exit", listener);
 	},
 	setMicrophoneExpanded: (expanded: boolean) => {
 		ipcRenderer.send("hud:setMicrophoneExpanded", expanded);

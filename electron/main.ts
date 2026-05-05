@@ -36,6 +36,7 @@ import { startMcpServer } from "./mcp/server";
 import type { OpenScreenMcpToolContext } from "./mcp/tools";
 import type { RendererCommandTarget } from "./mcp/toolTypes";
 import { RECORDINGS_DIR } from "./paths";
+import { registerTerminalSessionIpcHandlers } from "./terminalSessions";
 import {
 	createCountdownOverlayWindow,
 	createEditorWindow,
@@ -101,8 +102,26 @@ let countdownOverlayWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let selectedSourceName = "";
 let mcpServerController: McpHttpServerController | null = null;
+let mcpServerError: string | null = null;
 const isMac = process.platform === "darwin";
 const trayIconSize = isMac ? 16 : 24;
+
+function getMcpServerStatus() {
+	return (
+		mcpServerController?.getStatus() ?? {
+			running: false,
+			url: "http://127.0.0.1:18888/mcp",
+			host: "127.0.0.1",
+			port: 18888,
+			path: "/mcp",
+			sessionCount: 0,
+			authRequired:
+				Boolean(process.env["OPENSCREEN_MCP_TOKEN"]?.trim()) &&
+				process.env["OPENSCREEN_MCP_DISABLE_AUTH"] !== "true",
+			error: mcpServerError,
+		}
+	);
+}
 
 // Tray Icons
 const defaultTrayIcon = getTrayIcon("openscreen.png", trayIconSize);
@@ -555,6 +574,8 @@ app.whenReady().then(async () => {
 		},
 		switchToHudWrapper,
 	);
+	ipcMain.handle("mcp:get-server-status", () => getMcpServerStatus());
+	registerTerminalSessionIpcHandlers();
 
 	const commandBus = createRendererCommandBus({
 		getWindow: getMcpTargetWindow,
@@ -613,8 +634,11 @@ app.whenReady().then(async () => {
 		},
 		tools: toolContext,
 		server: {
-			getStatus: () => mcpServerController?.getStatus() ?? { running: false },
+			getStatus: getMcpServerStatus,
 		},
+		docsRoot: app.isPackaged
+			? path.join(process.resourcesPath, "docs")
+			: path.join(process.env["APP_ROOT"] ?? app.getAppPath(), "docs"),
 	});
 
 	try {
@@ -626,8 +650,10 @@ app.whenReady().then(async () => {
 			resources,
 			appVersion: app.getVersion(),
 		});
+		mcpServerError = null;
 		console.log(`[mcp] Streamable HTTP server listening at ${mcpServerController.url}`);
 	} catch (error) {
+		mcpServerError = error instanceof Error ? error.message : String(error);
 		console.error("[mcp] Failed to start Streamable HTTP server:", error);
 	}
 

@@ -1,6 +1,6 @@
 import type { Span } from "dnd-timeline";
 import { FolderOpen, Languages, Save, Video } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
 import {
@@ -78,6 +78,10 @@ import {
 	type ZoomRegion,
 } from "./types";
 import VideoPlayback, { VideoPlaybackRef } from "./VideoPlayback";
+
+const McpTerminalSidebar = lazy(() =>
+	import("./McpTerminalSidebar").then((module) => ({ default: module.McpTerminalSidebar })),
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -2768,7 +2772,7 @@ export default function VideoEditor() {
 
 			<div className="flex-1 p-5 gap-4 flex min-h-0 relative">
 				{/* Left Column - Video & Timeline */}
-				<div className="flex-[7] flex flex-col gap-3 min-w-0 h-full">
+				<div className="flex-[6] flex flex-col gap-3 min-w-0 h-full">
 					<PanelGroup direction="vertical" className="gap-3">
 						{/* Top section: video preview and controls */}
 						<Panel defaultSize={70} maxSize={70} minSize={40}>
@@ -2924,7 +2928,7 @@ export default function VideoEditor() {
 				</div>
 
 				{/* Right section: settings panel */}
-				<div className="flex-[3] min-w-[280px] max-w-[420px] h-full">
+				<div className="flex-[2.6] min-w-[260px] max-w-[380px] h-full">
 					<SettingsPanel
 						cursorHighlight={cursorHighlight}
 						onCursorHighlightChange={(next) => pushState({ cursorHighlight: next })}
@@ -3031,6 +3035,19 @@ export default function VideoEditor() {
 						unsavedExport={unsavedExport}
 						onSaveUnsavedExport={handleSaveUnsavedExport}
 					/>
+				</div>
+
+				{/* Right sidebar: MCP terminal */}
+				<div className="flex-[2.4] min-w-[300px] max-w-[420px] h-full">
+					<Suspense
+						fallback={
+							<div className="h-full bg-[#09090b] rounded-2xl border border-white/5 shadow-lg overflow-hidden flex items-center justify-center text-[11px] text-slate-500">
+								Loading MCP terminal...
+							</div>
+						}
+					>
+						<McpTerminalSidebar />
+					</Suspense>
 				</div>
 			</div>
 

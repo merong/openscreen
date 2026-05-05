@@ -5,6 +5,14 @@ OpenScreen의 현재 코드 흐름을 기준으로, 해당 기능을 MCP server 
 노출할 때 어떤 상태와 IPC, 렌더러 핸들러, 저장/내보내기 경로가 상호 작용해야
 하는지 분석한다.
 
+MCP로 실제 편집을 수행할 때는 먼저
+[MCP 편집 가이드와 시나리오 작성 규칙](mcp-editing-guide.md)을 시나리오 작성자와
+MCP 실행자에게 전달한다. 이 가이드는 원본 영상 맥락을 `MCP Edit Scenario`로
+정리하고, 아래 기능 문서를 참조해 tool call 순서로 변환하는 규칙을 정의한다.
+MCP 클라이언트는 `openscreen://editing/guide`,
+`openscreen://editing/feature-index`, `openscreen://editing/features/...` 리소스로
+같은 문서를 읽을 수 있다.
+
 ## 공통 연동 모델
 
 OpenScreen의 편집 가능 상태는 대부분 렌더러의 `VideoEditor`와

@@ -150,6 +150,41 @@ interface Window {
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean> | boolean) => () => void;
 		setLocale: (locale: string) => Promise<void>;
+		getMcpServerStatus: () => Promise<{
+			running?: boolean;
+			url?: string;
+			host?: string;
+			port?: number;
+			path?: string;
+			startedAt?: string;
+			sessionCount?: number;
+			authRequired?: boolean;
+			error?: string | null;
+		}>;
+		createTerminal: (options: {
+			sessionId: string;
+			cols: number;
+			rows: number;
+			mode?: "shell";
+		}) => Promise<{
+			success: boolean;
+			sessionId?: string;
+			pid?: number;
+			mode?: "shell";
+			cwd?: string;
+			shell?: string;
+			mcpClientConfig?: McpClientConfigInfo;
+			error?: string;
+		}>;
+		getMcpClientConfig: () => Promise<McpClientConfigInfo>;
+		writeTerminal: (sessionId: string, data: string) => void;
+		resizeTerminal: (sessionId: string, cols: number, rows: number) => void;
+		killTerminal: (sessionId: string) => void;
+		onTerminalData: (sessionId: string, callback: (data: string) => void) => () => void;
+		onTerminalExit: (
+			sessionId: string,
+			callback: (event: { exitCode: number; signal?: number }) => void,
+		) => () => void;
 		onMcpCommand: (
 			target: "hud" | "editor",
 			callback: (method: string, args: unknown) => Promise<unknown> | unknown,
@@ -170,4 +205,22 @@ interface CursorTelemetryPoint {
 	timeMs: number;
 	cx: number;
 	cy: number;
+}
+
+interface McpClientConfigWriteResult {
+	success: boolean;
+	path: string;
+	snippet: string;
+	manualCommands: string[];
+	error?: string;
+}
+
+interface McpClientConfigInfo {
+	projectRoot: string;
+	serverName: string;
+	endpoint: string;
+	authRequired: boolean;
+	tokenEnvVar: string;
+	codex: McpClientConfigWriteResult;
+	claude: McpClientConfigWriteResult;
 }

@@ -96,4 +96,33 @@ describe("startMcpServer", () => {
 			text: JSON.stringify({ success: true }, null, 2),
 		});
 	});
+
+	it("serves markdown resources as plain text", async () => {
+		controller = await startMcpServer({
+			host: "127.0.0.1",
+			port: 0,
+			path: "/mcp",
+			context: createTestContext(),
+			appVersion: "test",
+			resources: [
+				{
+					uri: "openscreen://editing/guide",
+					name: "mcp-editing-guide",
+					description: "Editing guide",
+					mimeType: "text/markdown",
+					read: async () => "# Editing Guide\n\nUse this before mutating tools.",
+				},
+			],
+		});
+
+		client = new Client({ name: "openscreen-test", version: "test" });
+		await client.connect(new StreamableHTTPClientTransport(new URL(controller.url)));
+
+		const resource = await client.readResource({ uri: "openscreen://editing/guide" });
+		expect(resource.contents[0]).toMatchObject({
+			uri: "openscreen://editing/guide",
+			mimeType: "text/markdown",
+			text: "# Editing Guide\n\nUse this before mutating tools.",
+		});
+	});
 });
